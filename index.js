@@ -2,8 +2,11 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 const app = express();
+const Stripe = require("stripe");
 const port = process.env.PORT || 5000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
 // middleware
 app.use(cors());
@@ -27,6 +30,7 @@ async function run() {
 
     const db = client.db("parcelDB");
     const parcelsCollection = db.collection("parcels");
+    const transactionsCollection = db.collection("transactions");
 
     // GET parcels (all or by user email)
     app.get("/parcels", async (req, res) => {
@@ -89,6 +93,66 @@ async function run() {
         res.status(500).send({ success: false, message: "Server error" });
       }
     });
+
+    app.post("/create-payment-intent", async (req, res) => {
+      const { amount } = req.body;
+
+      try {
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount, // in cents (100 = $1)
+          currency: "usd",
+          payment_method_types: ["card"],
+        });
+
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // record transaction history
+
+    app.post("/payments", async (req, res) => {
+      const { transactionId, amount, email, parcelId, paymentMethod } =
+        req.body;
+
+      try {
+        // 1. Save transaction to DB
+        const transaction = {
+          transactionId,
+          amount,
+          email,
+          parcelId,
+          paymentMethod,
+          createdAt: new Date(),
+          createdAtString : new Date().toISOString()
+        };
+        await transactionsCollection.insertOne(transaction);
+
+        // 2. Update parcel's payment status
+        await parcelsCollection.updateOne(
+          { _id: new ObjectId(parcelId) },
+          { $set: { payment_status: "paid" } }
+        );
+
+        res.send({
+          success: true,
+          message: "Payment recorded & parcel updated",
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ error: "Failed to record payment" });
+      }
+    });
+
+    app.get('/payments', async(req , res) =>{
+      const email = req.query.email;
+      const query = email ? {email} : {};
+      const result = await transactionsCollection.find(query).toArray();
+      res.send(result);
+    })
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
